@@ -3,9 +3,14 @@
 
 Mikrotik RouterOS ping like commands
 
+Baseado no pacote iputils-s20121221.
+Adicionado arquivo: colors.h
+Editado: ping_commons.h e ping_commons.c
+
 <pre>
 
-make
+make ping
+make ping6
 
 ./ping 200.160.2.3 -c 6
 

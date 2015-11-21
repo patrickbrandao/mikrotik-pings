@@ -28,6 +28,7 @@
 #include <sys/capability.h>
 #endif
 
+#include <termios.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -51,6 +52,7 @@ struct sysfs_devattr_values;
 #include <locale.h>
 #endif
 
+#include "colors.h"
 #include "SNAPSHOT.h"
 
 static void usage(void) __attribute__((noreturn));
@@ -95,6 +97,14 @@ struct timeval start, last;
 int sent, brd_sent;
 int received, brd_recv, req_recv;
 
+/* timing */
+int timing;					/* flag to do timing */
+long tmin = -1;				/* minimum round trip time */
+long tmax = -1;				/* maximum round trip time */
+long long tsum = 0;			/* sum of all times, for doing average */
+long long tsum2 = 0;
+
+
 #ifndef CAPABILITIES
 static uid_t euid;
 #endif
@@ -113,6 +123,10 @@ static inline socklen_t sll_len(size_t halen)
 }
 
 #define SLL_LEN(hln)		sll_len(hln)
+
+
+// cabecalho
+void print_header(void);
 
 void usage(void)
 {
@@ -153,8 +167,8 @@ static const cap_value_t caps[] = { CAP_NET_RAW, };
 static cap_flag_value_t cap_raw = CAP_CLEAR;
 #endif
 
-void limit_capabilities(void)
-{
+void limit_capabilities(void){
+
 #ifdef CAPABILITIES
 	cap_t cap_p;
 
@@ -202,8 +216,8 @@ void limit_capabilities(void)
 #endif
 }
 
-int modify_capability_raw(int on)
-{
+int modify_capability_raw(int on){
+
 #ifdef CAPABILITIES
 	cap_t cap_p;
 
@@ -233,18 +247,16 @@ int modify_capability_raw(int on)
 	return 0;
 }
 
-static inline int enable_capability_raw(void)
-{
+static inline int enable_capability_raw(void){
 	return modify_capability_raw(1);
 }
 
-static inline int disable_capability_raw(void)
-{
+static inline int disable_capability_raw(void){
 	return modify_capability_raw(0);
 }
 
-void drop_capabilities(void)
-{
+void drop_capabilities(void){
+
 #ifdef CAPABILITIES
 	cap_t cap_p = cap_init();
 
@@ -310,33 +322,23 @@ int send_pack(int s, struct in_addr src, struct in_addr dst,
 	return err;
 }
 
+
 void finish(void)
 {
-	if (!quiet) {
-		printf("Sent %d probes (%d broadcast(s))\n", sent, brd_sent);
-		printf("Received %d response(s)", received);
-		if (brd_recv || req_recv) {
-			printf(" (");
-			if (req_recv)
-				printf("%d request(s)", req_recv);
-			if (brd_recv)
-				printf("%s%d broadcast(s)",
-				       req_recv ? ", " : "",
-				       brd_recv);
-			printf(")");
-		}
-		printf("\n");
-		fflush(stdout);
-	}
+
+	// imprimir estatisticas
+	//printf("Fechando\n");
+	print_stats(0);
+
 	if (dad)
 		exit(!!received);
 	if (unsolicited)
 		exit(0);
+
 	exit(!received);
 }
 
-void catcher(void)
-{
+void catcher(void){
 	struct timeval tv, tv_s, tv_o;
 
 	gettimeofday(&tv, NULL);
@@ -373,8 +375,99 @@ void print_hex(unsigned char *p, int len)
 	}
 }
 
-int recv_pack(unsigned char *buf, int len, struct sockaddr_ll *FROM)
-{
+// Imprimir estatisticas
+void print_stats(int reprint_header){
+	int nreceived = 0;
+	int lost=0;
+	long temp_msecs = 0;
+	static showcount = 0;
+	int show_header = 0;
+
+	showcount++;
+	if(reprint_header){
+		// mikrotik: 19 pings
+		if(showcount == 19){
+			show_header = 1;
+			showcount=0;
+			// printf("\n");
+
+		}else{
+			return;
+		}
+	}
+
+
+	// string de tempo minimo
+	char buf_minrtt[16]; bzero(buf_minrtt, 16);
+	long _tmin_usecs = tmin;
+	temp_msecs = (_tmin_usecs+500)/1000;
+	_tmin_usecs -= temp_msecs*1000 - 500;
+	sprintf(buf_minrtt, "%ld.%03ld", temp_msecs, _tmin_usecs);
+
+	// string de tempo maximo
+	char buf_maxrtt[16]; bzero(buf_maxrtt, 16);
+	long _tmax_usecs = tmax;
+	temp_msecs = (_tmax_usecs+500)/1000;
+	_tmax_usecs -= temp_msecs*1000 - 500;
+	sprintf(buf_maxrtt, "%ld.%03ld", temp_msecs, _tmax_usecs);
+
+	// string de tempo medio
+	char buf_avgrtt[16]; bzero(buf_avgrtt, 16);
+	long _tavg_usecs = received ? (tsum / received) : 0;
+	temp_msecs = (_tavg_usecs+500)/1000;
+	_tavg_usecs -= temp_msecs*1000 - 500;
+	sprintf(buf_avgrtt, "%ld.%03ld", temp_msecs, _tavg_usecs);
+
+//		tsum /= nreceived + nrepeats;
+
+	// calcular perdas
+	if (sent) {
+		// enviados....: sent
+		// recebidos...: received
+		long long sa, rb;
+		sa = (long long)sent;
+		rb = (long long)received;
+		lost = 100;
+		if(received){
+			// 100 = send
+			//  x  = received
+			lost = (int) ((((sa - rb)) * 100) / sa);
+		}
+	}
+
+	if (!quiet) { 
+		printf("     ");
+		printf("%ssent=%s%ld%s received=%s%d%s packet-loss=%s%d%%%s min-rtt=%s%s%s avg-rtt=%s%s%s max-rtt=%s%s%s",
+				KGRN,
+				LWHT, sent, KGRN,
+				LWHT, received, KGRN, 
+				LWHT, lost, KGRN,
+					LWHT, buf_minrtt, KGRN, 
+					LWHT, buf_avgrtt,KGRN,
+					LWHT, buf_maxrtt, RESET
+		);
+		if(show_header){
+			printf("\n");
+			print_header();
+		}else{
+			printf("\n");
+		}
+
+		fflush(stdout);
+
+	}
+
+}
+
+// cabecalho
+void print_header(void){
+	printf("%s%s SEQ TYPE    TARGET         MAC-ADDRESS          TIME      STATUS%s\n",  FONT_BOLD, LWHT, RESET);
+//	printf("%s%s SEQ ARP-TYPE                MAC-ADDRESS           TIME    STATUS%s\n",  FONT_BOLD, LWHT, RESET);
+  //printf("%s%s SEQ HOST                                      SIZE TTL TIME  STATUS%s\n",  FONT_BOLD, LWHT, RESET);
+}
+
+
+int recv_pack(unsigned char *buf, int len, struct sockaddr_ll *FROM){
 	struct timeval tv;
 	struct arphdr *ah = (struct arphdr*)buf;
 	unsigned char *p = (unsigned char *)(ah+1);
@@ -437,35 +530,9 @@ int recv_pack(unsigned char *buf, int len, struct sockaddr_ll *FROM)
 		if (src.s_addr && src.s_addr != dst_ip.s_addr)
 			return 0;
 	}
-	if (!quiet) {
-		int s_printed = 0;
-		printf("%s ", FROM->sll_pkttype==PACKET_HOST ? "Unicast" : "Broadcast");
-		printf("%s from ", ah->ar_op == htons(ARPOP_REPLY) ? "reply" : "request");
-		printf("%s [", inet_ntoa(src_ip));
-		print_hex(p, ah->ar_hln);
-		printf("] ");
-		if (dst_ip.s_addr != src.s_addr) {
-			printf("for %s ", inet_ntoa(dst_ip));
-			s_printed = 1;
-		}
-		if (memcmp(p+ah->ar_hln+4, ((struct sockaddr_ll *)&me)->sll_addr, ah->ar_hln)) {
-			if (!s_printed)
-				printf("for ");
-			printf("[");
-			print_hex(p+ah->ar_hln+4, ah->ar_hln);
-			printf("]");
-		}
-		if (last.tv_sec) {
-			long usecs = (tv.tv_sec-last.tv_sec) * 1000000 +
-				tv.tv_usec-last.tv_usec;
-			long msecs = (usecs+500)/1000;
-			usecs -= msecs*1000 - 500;
-			printf(" %ld.%03ldms\n", msecs, usecs);
-		} else {
-			printf(" UNSOLICITED?\n");
-		}
-		fflush(stdout);
-	}
+
+	// ATUALIZAR ESTATISTICAS
+
 	received++;
 	if (FROM->sll_pkttype != PACKET_HOST)
 		brd_recv++;
@@ -477,7 +544,131 @@ int recv_pack(unsigned char *buf, int len, struct sockaddr_ll *FROM)
 		memcpy(((struct sockaddr_ll *)&he)->sll_addr, p, ((struct sockaddr_ll *)&me)->sll_halen);
 		unicasting=1;
 	}
+
+	// ATUALIZAR TEMPOS MINIMOS E MAXIMOS
+	if (last.tv_sec) {
+		long usecs = (tv.tv_sec-last.tv_sec) * 1000000 + tv.tv_usec-last.tv_usec;
+		if(tmin < 0 || tmin > usecs) tmin = usecs;	// minimo
+		if(tmax < 0 || tmax < usecs) tmax = usecs;	// maior
+		tsum += usecs; // soma total do tempo das respostas
+	}
+
+	/*
+	tsum += triptime;
+	tsum2 += (long long)triptime * (long long)triptime;
+	if (triptime < tmin)
+		tmin = triptime;
+	if (triptime > tmax)
+		tmax = triptime;
+	if (!rtt)
+		rtt = triptime*8;
+	else
+		rtt += triptime-rtt/8;
+	if (options&F_ADAPTIVE)
+		update_interval();
+	*/
+
+
+	// IMPRIMIR RESPOSTA
+	if (!quiet) {
+		int s_printed = 0;
+		int tmp = 0;
+
+		// ENVIADOS
+		printf("%4u ", sent);
+
+		// Tipo ethernet
+		if(ah->ar_op == htons(ARPOP_REPLY)){
+			printf("Reply  ");
+		}else{
+			printf("Request");
+		}
+
+		// Tipo de resposta
+		if(FROM->sll_pkttype==PACKET_HOST){
+			printf(" ");
+		}else{
+			printf("*");
+		}
+
+		//printf("%s ", FROM->sll_pkttype==PACKET_HOST ? "Unicast" : "Broadcast");
+		// printf("%s from ", ah->ar_op == htons(ARPOP_REPLY) ? "reply" : "request");
+		printf("%-15s", inet_ntoa(src_ip));
+		//printf("255.255.255.255 ");
+		print_hex(p, ah->ar_hln);
+		// printf("] ");
+
+		// espaco entre MAC e time
+		printf("    ");
+
+		if (last.tv_sec) {
+			char buf[16];
+			bzero(buf, 16);
+
+			long usecs = (tv.tv_sec-last.tv_sec) * 1000000 +
+				tv.tv_usec-last.tv_usec;
+			long msecs = (usecs+500)/1000;
+			usecs -= msecs*1000 - 500;
+
+
+			sprintf(buf, "%ld.%03ld", msecs, usecs);
+			printf("%-9s", buf);
+
+		} else {
+
+			printf("%sUNSOLICIT%s", LYEL, RESET);
+			tmp = 1;
+		}
+
+		// Status
+		printf(" ");
+
+		if (dst_ip.s_addr != src.s_addr) {
+			printf("%sFor %s %s", LBLU, inet_ntoa(dst_ip), RESET);
+			s_printed = 1;
+			tmp = 1;
+		}
+		if (memcmp(p+ah->ar_hln+4, ((struct sockaddr_ll *)&me)->sll_addr, ah->ar_hln)) {
+			if (!s_printed)
+				printf("%sFor %s", KBLU, RESET);
+			printf("%s", LBLU);
+			print_hex(p+ah->ar_hln+4, ah->ar_hln);
+			printf("%s", RESET);
+			tmp = 1;
+		}
+
+		// status padrao
+		if(!tmp){
+			printf("%sOK%s", LGRN, RESET);
+		}
+		// fim
+		printf("\n");
+
+		print_stats(1);
+
+		/*
+		if (dst_ip.s_addr != src.s_addr) {
+			printf("for %s ", inet_ntoa(dst_ip));
+			s_printed = 1;
+		}
+		if (memcmp(p+ah->ar_hln+4, ((struct sockaddr_ll *)&me)->sll_addr, ah->ar_hln)) {
+			if (!s_printed)
+				printf("for ");
+			printf("[");
+			print_hex(p+ah->ar_hln+4, ah->ar_hln);
+			printf("]");
+		}
+		*/
+
+
+
+		fflush(stdout);
+
+	}
+
+
 	return 1;
+
 }
 
 #ifdef USE_SYSFS
@@ -1191,10 +1382,16 @@ main(int argc, char **argv)
 	set_device_broadcast(&device, ((struct sockaddr_ll *)&he)->sll_addr,
 			     ((struct sockaddr_ll *)&he)->sll_halen);
 
+/*
 	if (!quiet) {
 		printf("ARPING %s ", inet_ntoa(dst));
 		printf("from %s %s\n",  inet_ntoa(src), device.name ? : "");
 	}
+*/
+
+	print_header();
+
+
 
 	if (!src.s_addr && !dad) {
 		fprintf(stderr, "arping: no source address in not-DAD mode\n");
@@ -1203,8 +1400,10 @@ main(int argc, char **argv)
 
 	drop_capabilities();
 
+
 	set_signal(SIGINT, finish);
 	set_signal(SIGALRM, catcher);
+
 
 	catcher();
 
